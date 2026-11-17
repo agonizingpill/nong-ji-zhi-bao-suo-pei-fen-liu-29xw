@@ -29,5 +29,10 @@ def adjudicate(s,c,decision,u):
     if c.status!='assessed':raise HTTPException(409,'索赔须完成风险分流，且不可重复裁决')
     i=s.scalar(select(Inspection).where(Inspection.claim_id==c.id))
     if not i:raise HTTPException(409,'必须先记录拆检意见')
-    if decision=='paid' and c.risk is not None and c.risk>=.5 and not i.evidence_complete:raise HTTPException(409,'高争议风险索赔必须补齐拆检证据后才能赔付')
+    from .sampling_service import sampled_active
+    high_risk=c.risk is not None and c.risk>=.5
+    sampled=sampled_active(s,c.id) is not None
+    if decision=='paid' and (high_risk or sampled) and not i.evidence_complete:
+        if sampled and not high_risk:raise HTTPException(409,'该低风险索赔被当日抽检抽中，必须补齐拆检证据后才能赔付')
+        raise HTTPException(409,'高争议风险索赔必须补齐拆检证据后才能赔付')
     c.status=decision;i.decision=decision;audit(s,u,'claim_adjudicated',f'{c.code}:{decision}');return claim_view(s,c)

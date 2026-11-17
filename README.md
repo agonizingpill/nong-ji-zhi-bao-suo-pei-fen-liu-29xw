@@ -22,7 +22,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 |---|---|---|---|
 |admin 质保主管|admin@gengchuan.local|Field2026!|台账编辑、受理、拆检、最终赔付/拒赔、旧件核验、结算核定和记账|
 |assessor 拆检评估员|assessor@gengchuan.local|Field2026!|新机登记、索赔、分流、拆检、旧件发件/收货、结算草稿；不可签署|
-|viewer 经销商观察员|viewer@gengchuan.local|Field2026!|只读九页及审计|
+|viewer 经销商观察员|viewer@gengchuan.local|Field2026!|只读各业务页及审计|
 
 ## 业务与页面
 
@@ -51,7 +51,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 |队列|Redis7 list；共享 artifacts 卷保存模型指标与心跳|
 |安全横切|JWT8小时、角色校验、PBKDF2口令、审计、请求追踪、全局错误恢复|
 
-`backend/src/models.py` 领域实体；`schemas.py` 请求约束；`claim_service.py` 状态与关联规则；`risk_model.py` 算法；`worker.py` 队列；`main.py` 路由；`middlewares.py` 请求追踪和错误恢复。`backend/scripts/seed_demo.py` 仅插入自然键缺失的演示记录，不覆盖修改。`frontend/src/pages/` 九业务页；`components/common.js` 共享导航、状态、标题和通知；`utils/api.js` API/会话/页面状态；`utils/format.js` 转义和格式化。
+`backend/src/models.py` 领域实体；`schemas.py` 请求约束；`claim_service.py` 状态与关联规则；`risk_model.py` 算法；`worker.py` 队列；`main.py` 路由；`middlewares.py` 请求追踪和错误恢复。`backend/scripts/seed_demo.py` 仅插入自然键缺失的演示记录，不覆盖修改。`frontend/src/pages/` 十业务页；`components/common.js` 共享导航、状态、标题和通知；`utils/api.js` API/会话/页面状态；`utils/format.js` 转义和格式化。
 
 角色、索赔状态、故障部位枚举分别在 `backend/src/constants.py` 与 `frontend/src/constants.js` 定义；请求部位在 `backend/src/schemas.py` 的 Literal 中约束；角色校验在 `security.py`/`main.py`，状态转换在 `claim_service.py`/`worker.py`。共用状态徽标在索赔/风险/拆检三页复用。
 
@@ -94,6 +94,26 @@ Seed 另有 `CL-RETURN-DEMO`（已赔付、可发件）和 `CL-SETTLE-DEMO`（�
 seed新增BAY-HYD(8h/日)、BAY-QUICK(4h/日)、BAY-OFF停用，以及hydraulic20/engine5/transmission3件备件。可用CL-RETURN-DEMO或CL-SETTLE-DEMO已赔付索赔演练预约→匹配领料→开工→完工→质量回访；异常再安排同索赔新预约返工后主管关闭。自然键只补缺失，重复seed不改已扣库存、维修实耗、工位容量、回访与原结算。新增5张表，不给原历史表加列，也不回填改变旧签结。
 
 当前范围：预约为按日工时额度，无具体起止时刻、跨工位调度或取消；完工超时只留主管依据，不重分配其他预约。工位停用只阻止新预约，已确认维修仍可履约；无工资、采购补货、拆单部分退料、仓库扫码或真实售后联系。回访是人工登记，不外发消息；异常关闭证明同索赔返工完工，不替代另一轮质量验收或重开原赔款。新增证据见 `test-artifacts/gb-1022/v3/`。
+
+## 按日抽检派单（第四轮扩展）
+
+10. 每日抽检派单：每天完整拆检名额有限，仅按高风险优先会漏掉被低估的索赔。主管按日建立 `InspectionPlan`，设置当日总名额与低风险随机抽检保留额（保留额不超过总名额，每日仅一份计划）。候选池为已完成风险分流、处于待裁决且未被其他名单活跃占用的现场索赔；低风险（概率 <0.5）先用日期与建单人经 SHA-256 派生的固定种子洗牌抽签，占满保留额并记录每个随机数；其余名额保持原分流逻辑，按争议概率由高到低（同概率按索赔编号）风险优先派满。原风险分流算法与 0.5 高风险阈值不变。
+
+确认后名单一次性固化：`InspectionSlot` 保存选中索赔、风险快照、抽签值与中文抽签依据，计划转为 `confirmed`。重复确认是幂等重试，只返回已固化名单，不重复占额、不换人，并留 `sampling_confirm_replayed` 审计。跨计划并发确认时，行锁（`with_for_update`）串行化候选与占额读取，`active_claim_id` 全局唯一索引是最终防线，保证并发确认不同名单也不会超额或重复选中同一索赔。
+
+名额状态机 `selected → started / withdrawn`：未开检可撤回，清空 `active_claim_id` 归还名额（同计划内不自动换人，索赔可进入后续计划，旧撤回记录保留）；开检后不可撤回、不可归还。撤回与开检互斥，先达成的一种生效，另一种返回 409。计划视图实时给出占用、剩余、已开检与已归还数量，前端可查每个名额的占额去向。
+
+赔付证据规则同步收紧：抽中的低风险索赔也必须 `evidence_complete` 才能赔付；未抽中的高风险索赔仍执行原 50% 阈值证据要求；未抽中的低风险索赔维持原流程，历史已结案索赔不进入候选、旧结案不变。
+
+|接口|权限/动作|
+|---|---|
+|GET /inspection-plans|三角色读取计划、名额与占额去向|
+|POST /inspection-plans|仅 admin 建当日草稿（总名额、低风险保留额）|
+|GET /inspection-plans/{id}/candidates|仅 admin 确认前预览候选池、分层计数与示例抽签值|
+|POST /inspection-plans/{id}/confirm|仅 admin 固化名单；重复调用幂等不重复占额|
+|POST /inspection-slots/{id}/start、/withdraw|admin/assessor 开检与撤回；viewer 只读|
+
+新增 `sampling_models.py`、`sampling_service.py`、`sampling_schemas.py`、`sampling_routes.py` 与前端 `pages/sampling.js`（第 10 页），不给原表加列、不回填旧签结；`claim_service.adjudicate` 仅追加抽中低风险的证据校验分支。Seed 新增 `CL-SAMP-01..10` 十笔待裁决索赔（含低/高风险），并固化一份 2026-11-17 计划（含已开检与已撤回名额各一，可直接查看占额去向）与一份 2026-11-18 草稿计划；重复 seed 不改变名额状态与占用。
 
 ## 已知范围
 

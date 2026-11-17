@@ -8,3 +8,7 @@ SETTLEMENT_STATES=('draft','approved','booked')
 REPAIR_STATES=('reserved','running','completed')
 ISSUE_STATES=('issued','returned','consumed')
 FOLLOWUP_STATES=('review','rework','closed')
+
+SAMPLING_PLAN_STATES=('draft','confirmed')
+SAMPLING_SLOT_STATES=('selected','withdrawn','started')
+SAMPLING_SELECTIONS=('random_low','risk_priority')

@@ -1,4 +1,5 @@
 import random, json
+from datetime import date
 from sqlalchemy import select,func
 from src.database import Base,engine,Session
 from src.models import User,Machine,Claim,Inspection
@@ -8,6 +9,9 @@ from src.settlement_models import Settlement
 from src.repair_models import RepairBay,RepairAppointment
 from src.spare_models import SpareStock,PartIssue
 from src.followup_models import RepairFollowup
+from src.sampling_models import InspectionPlan,InspectionSlot
+from src.sampling_schemas import PlanIn
+from src import sampling_service as sampling
 
 def seed():
     Base.metadata.create_all(engine)
@@ -42,6 +46,28 @@ def seed():
             if not s.scalar(select(RepairBay).where(RepairBay.code==code)):s.add(RepairBay(code=code,daily_hours=cap,active=active))
         for code,part,qty in [('SP-HYD-01','hydraulic',20),('SP-ENG-01','engine',5),('SP-TRANS-01','transmission',3)]:
             if not s.scalar(select(SpareStock).where(SpareStock.code==code)):s.add(SpareStock(code=code,part=part,available_qty=qty))
+    with Session.begin() as s:
+        machines=s.scalars(select(Machine).order_by(Machine.id)).all()
+        demo_risks=[.12,.28,.41,.47,.18,.62,.73,.55,.81,.34]
+        for idx,risk in enumerate(demo_risks):
+            code=f'CL-SAMP-{idx+1:02}'
+            if s.scalar(select(Claim).where(Claim.code==code)):continue
+            m=machines[idx%2]
+            s.add(Claim(code=code,machine_id=m.id,part=['hydraulic','engine','transmission'][idx%3],
+                hours_at_failure=900+idx*35,age_days=300+idx*22,leak_flag=risk>=.5,
+                risk=risk,status='assessed',historical=False,
+                assessment_note=json.dumps({'seed_demo':True,'high_risk_threshold':.5},ensure_ascii=False)))
+        s.flush()
+        admin={'email':'admin@gengchuan.local','role':'admin'}
+        if not s.scalar(select(InspectionPlan).where(InspectionPlan.plan_date==date(2026,11,17))):
+            p=sampling.create_plan(s,PlanIn(plan_date=date(2026,11,17),total_quota=4,low_risk_reserve=2),admin)
+            p=sampling.confirm(s,p['id'],admin)
+            slots=p['slots']
+            if len(slots)>=2:
+                sampling.start(s,slots[0]['id'],admin)
+                sampling.withdraw(s,slots[1]['id'],admin)
+        if not s.scalar(select(InspectionPlan).where(InspectionPlan.plan_date==date(2026,11,18))):
+            sampling.create_plan(s,PlanIn(plan_date=date(2026,11,18),total_quota=5,low_risk_reserve=2),admin)
     with Session() as s:
-        print(json.dumps({k:s.scalar(select(func.count()).select_from(v)) for k,v in [('users',User),('machines',Machine),('claims',Claim),('inspections',Inspection),('part_returns',PartReturn),('settlements',Settlement),('repair_bays',RepairBay),('repair_appointments',RepairAppointment),('spare_stocks',SpareStock),('part_issues',PartIssue),('repair_followups',RepairFollowup)]}))
+        print(json.dumps({k:s.scalar(select(func.count()).select_from(v)) for k,v in [('users',User),('machines',Machine),('claims',Claim),('inspections',Inspection),('part_returns',PartReturn),('settlements',Settlement),('repair_bays',RepairBay),('repair_appointments',RepairAppointment),('spare_stocks',SpareStock),('part_issues',PartIssue),('repair_followups',RepairFollowup),('inspection_plans',InspectionPlan),('inspection_slots',InspectionSlot)]}))
 if __name__=='__main__':seed()
